@@ -1,0 +1,385 @@
+version: '3.8'
+
+# Определяем общую сеть
+#networks:
+#  app-network:
+#    driver: bridge
+#  db-network:
+#    driver: bridge
+
+services:
+  # --- Kafka инфраструктура ---
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.5.0
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    ports:
+      - "2181:2181"
+
+  kafka:
+    image: confluentinc/cp-kafka:7.5.0
+    depends_on:
+      - zookeeper
+    ports:
+      - "9092:9092"
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: 'true'
+      KAFKA_NUM_PARTITIONS: 3
+    healthcheck:
+      test: ["CMD", "kafka-topics", "--bootstrap-server", "localhost:9092", "--list"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 40s
+
+
+  kafka-ui:
+    image: provectuslabs/kafka-ui:latest
+    depends_on:
+      - kafka
+    ports:
+      - "8080:8080"
+    environment:
+      KAFKA_CLUSTERS_0_NAME: local
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:9092
+      KAFKA_CLUSTERS_0_ZOOKEEPER: zookeeper:2181
+
+  # Базы данных
+  users-db:
+    image: postgres:15-alpine
+    container_name: users_db
+    environment:
+      POSTGRES_DB: se_user_db
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "5435:5432"
+#    networks:
+#      - app-network
+    volumes:
+      - ./sb_users/init-db.sql:/docker-entrypoint-initdb.d/init.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  chats-db:
+    image: postgres:15-alpine
+    container_name: chats_db
+    environment:
+      POSTGRES_DB: se_chats_db
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "5433:5432"  # другой порт на хосте, чтобы не конфликтовать
+#    networks:
+#      - app-network
+    volumes:
+      - ./sb_chats/init-db.sql:/docker-entrypoint-initdb.d/init.sql
+    healthcheck:
+      test: [ "CMD-SHELL", "pg_isready -U postgres" ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  products-db:
+    image: postgres:15-alpine
+    container_name: products-db
+    environment:
+      POSTGRES_DB: se_products_db
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "5434:5432"
+#    networks:
+#      - app-network
+    volumes:
+      - ./api/sb_products/init-db.sql:/docker-entrypoint-initdb.d/init.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  se-services-db:
+    image: postgres:15-alpine
+    container_name: se-services-db
+    environment:
+      POSTGRES_DB: se_services_db
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "5436:5432"
+#    networks:
+#      - app-network
+    volumes:
+      - ./api/sb_services/init-db.sql:/docker-entrypoint-initdb.d/init.sql
+    healthcheck:
+      test: [ "CMD-SHELL", "pg_isready -U postgres" ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  vacancies-db:
+    image: postgres:15-alpine
+    container_name: se-vacancies-db
+    environment:
+      POSTGRES_DB: se_vacancies_db
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "5431:5432"
+#    networks:
+#      - app-network
+    volumes:
+      - ./api/sb_vacancies/init-db.sql:/docker-entrypoint-initdb.d/init.sql
+    healthcheck:
+      test: [ "CMD-SHELL", "pg_isready -U postgres" ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # --- Микросервис 1 (users) ---
+  users-service:
+    build:
+      context: ./sb_users
+      dockerfile: Dockerfile
+    container_name: sb_users_con1
+    ports:
+      - "8002:8002"
+    environment:
+      - KAFKA_BOOTSTRAP_SERVERS=kafka:9092
+      - APP_PORT=8002
+      - SERVICE_NAME=users-service
+      - DB_HOST=users-db
+      - DB_PORT=5432
+      - DB_NAME=se_user_db
+      - DB_USER=postgres
+      - DB_PASS=postgres
+#    networks:
+#      - app-network  # Добавили сеть
+    depends_on:
+      kafka:
+        condition: service_healthy
+      users-db:
+        condition: service_healthy
+    # Добавляем healthcheck для users-service
+    healthcheck:
+      test: [ "CMD", "curl", "-f", "http://localhost:8002/health" ]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 40s
+    command: [ "uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8002" ]
+
+  # --- Микросервис 2 (chats) ---
+  chats-service:
+    build:
+      context: ./sb_chats  # путь к папке со вторым сервисом
+      dockerfile: Dockerfile
+    container_name: sb_chats_con1
+    ports:
+      - "8001:8001"
+#    networks:
+#      - app-network
+    environment:
+      - KAFKA_BOOTSTRAP_SERVERS=kafka:9092
+      - APP_PORT=8001
+      - SERVICE_NAME=chats-service
+
+      - DB_HOST=chats-db
+      - DB_PORT=5432
+      - DB_NAME=se_chats_db
+      - DB_USER=postgres
+      - DB_PASS=postgres
+
+    depends_on:
+      - users-service
+      - chats-db
+    healthcheck:
+      test: [ "CMD", "curl", "-f", "http://localhost:8001/health" ]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 40s
+    command: ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8001"]
+
+  # --- Микросервис 3 (products) ---
+  products-service:
+    build:
+      context: ./api/sb_products
+      dockerfile: Dockerfile
+    container_name: products_api_con
+    ports:
+      - "8006:8006"
+#    networks:
+#      - app-network
+    environment:
+      - KAFKA_BOOTSTRAP_SERVERS=kafka:9092
+      - APP_PORT=8006
+      - SERVICE_NAME=products-service
+
+      - DB_HOST=products-db
+      - DB_PORT=5432
+      - DB_NAME=se_products_db
+      - DB_USER=postgres
+      - DB_PASS=postgres
+    depends_on:
+      kafka:
+        condition: service_healthy  # Добавьте healthcheck для Kafka
+      zookeeper:
+        condition: service_started
+      products-db:
+        condition: service_healthy
+    healthcheck:
+      test: [ "CMD", "curl", "-f", "http://localhost:8006/health" ]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 40s
+    command: ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8006"]
+
+  # --- Микросервис 4 (se-services) ---
+  se-services-service:
+    build:
+      context: ./api/sb_services
+      dockerfile: Dockerfile
+    container_name: se_services_api_con
+    ports:
+      - "8007:8007"
+#    networks:
+#      - app-network
+    environment:
+      - KAFKA_BOOTSTRAP_SERVERS=kafka:9092
+      - APP_PORT=8007
+      - SERVICE_NAME=se-services-service
+
+      - DB_HOST=se-services-db
+      - DB_PORT=5432
+      - DB_NAME=se_services_db
+      - DB_USER=postgres
+      - DB_PASS=postgres
+    depends_on:
+      se-services-db:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy  # Добавьте healthcheck для Kafka
+      zookeeper:
+        condition: service_started
+    healthcheck:
+      test: [ "CMD", "curl", "-f", "http://localhost:8007/health" ]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 40s
+    command: [ "uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8007" ]
+
+  # --- Микросервис 5 (vacancies) ---
+  vacancies-service:
+    build:
+      context: ./api/sb_vacancies
+      dockerfile: Dockerfile
+    container_name: vacancies_api_con
+    ports:
+      - "8005:8005"
+#    networks:
+#      - app-network
+    environment:
+      - KAFKA_BOOTSTRAP_SERVERS=kafka:9092
+      - APP_PORT=8005
+      - SERVICE_NAME=vacancies-service
+
+      - DB_HOST=vacancies-db
+      - DB_PORT=5432
+      - DB_NAME=se_vacancies_db
+      - DB_USER=postgres
+      - DB_PASS=postgres
+    depends_on:
+      vacancies-db:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy  # Добавьте healthcheck для Kafka
+      zookeeper:
+        condition: service_started
+    healthcheck:
+      test: [ "CMD", "curl", "-f", "http://localhost:8005/health" ]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 40s
+    command: [ "uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8005" ]
+
+  gateway-service:
+    build:
+      context: ./sb_api_gateway/
+      dockerfile: Dockerfile
+    container_name: gateway_con
+    ports:
+      - "8003:8003"
+#    networks:
+#      - app-network
+    environment:
+      - KAFKA_BOOTSTRAP_SERVERS=kafka:9092
+      - APP_PORT=8003
+      - SERVICE_NAME=gateway-service
+#
+##      - AUTH_SERVICE_URL=users-service  # Имя сервиса, а не контейнера!
+##      - AUTH_SERVICE_PORT=8002
+##      - PRODUCT_SERVICE_URL=products-service
+##      - PRODUCT_SERVICE_PORT=8006
+##      - CHAT_SERVICE_URL=chats-service
+##      - CHAT_SERVICE_HOST=8001
+##      - VACANCY_SERVICE_URL=vacancies-service
+##      - VACANCY_SERVICE_PORT=8005
+##      - SERVICES_SERVICE_URL=se-services-service
+##      - SERVICES_SERVICE_PORT=8007
+      # Chat service
+      - CHAT_SERVICE_URL=chats-service
+      - CHAT_SERVICE_PORT=8001
+      # Auth service
+      - AUTH_SERVICE_URL=users-service
+      - AUTH_SERVICE_PORT=8002
+      # Vacancy service
+      - VACANCY_SERVICE_URL=vacancies-service
+      - VACANCY_SERVICE_PORT=8005
+      # Product service
+      - PRODUCT_SERVICE_URL=products-service
+      - PRODUCT_SERVICE_PORT=8006
+      # Services service
+      - SERVICES_SERVICE_URL=se-services-service
+      - SERVICES_SERVICE_PORT=8007
+    depends_on:
+      vacancies-service:
+        condition: service_started
+      products-service:
+        condition: service_started
+      se-services-service:
+        condition: service_started
+      chats-service:
+        condition: service_started
+      users-service:
+        condition: service_started
+      kafka:
+        condition: service_started  # Добавьте healthcheck для Kafka
+      zookeeper:
+        condition: service_started
+    healthcheck:
+      test: [ "CMD", "curl", "-f", "http://localhost:8003/health" ]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+    command: [ "uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8003" ]
+
+#

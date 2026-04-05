@@ -44,7 +44,7 @@ class ApiProxy:
                     url=url,
                     headers=proxy_headers,
                     json=data if data else None,
-                    params=params or dict(request.query_params),
+                    params=dict(request.query_params),
                     timeout=30.0,
                     follow_redirects=True
                 )
